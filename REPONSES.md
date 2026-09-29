@@ -2,49 +2,50 @@
 
 ## 1. Différence entre une image Docker et un conteneur Docker
 
-Une **image** est un modèle immuable, en lecture seule, construit à partir d'un Dockerfile : elle
-empile des couches (système de base, dépendances, code de l'application) et décrit la commande
-de démarrage. Un **conteneur** est une instance en cours d'exécution de cette image : Docker lui
-ajoute une couche inscriptible, un processus isolé, un réseau et un cycle de vie propre
-(créé, démarré, arrêté, supprimé). Une même image (`mon-service:1.0`) peut lancer plusieurs
-conteneurs, comme les 3 puis 5 pods du Deployment.
+Une **image Docker** peut être vue comme un modèle qui contient tout ce dont une application a besoin pour fonctionner : le système de base, les dépendances, le code de l'application et la commande à lancer. Une image est en lecture seule et peut être utilisée pour créer plusieurs conteneurs.
+
+Un **conteneur** est une instance de cette image qui est réellement lancée. Il possède son propre environnement isolé et peut être démarré, arrêté ou supprimé.
+
+Par exemple, une même image `mon-service:1.0` peut servir à lancer plusieurs conteneurs, comme les 3 puis les 5 pods utilisés dans le Deployment.
 
 ## 2. Pourquoi les données sont perdues si l'on supprime le volume, mais pas le conteneur ?
 
-Le conteneur est éphémère : tout ce qu'il écrit dans sa couche inscriptible disparaît avec lui.
-Ici, PostgreSQL écrit dans `/var/lib/postgresql/data`, qui est monté sur le volume nommé
-`donnees_db`. Ce volume est géré par Docker **indépendamment** du cycle de vie des conteneurs :
-`docker compose down` supprime les conteneurs mais conserve le volume, donc au redémarrage la
-base retrouve ses fichiers. `docker compose down -v` supprime aussi le volume : les données
-disparaissent, et au démarrage suivant `init.sql` est rejoué sur une base vide.
+Un conteneur est généralement considéré comme temporaire. Les données écrites directement à l'intérieur du conteneur sont donc perdues lorsque celui-ci est supprimé.
 
-## 3. Un Deployment `replicas: 3` perd un pod : que fait Kubernetes ? Pourquoi « déclaratif » ?
+Dans notre cas, PostgreSQL stocke ses données dans `/var/lib/postgresql/data`. Ce dossier est associé au volume Docker `donnees_db`.
 
-Le contrôleur (ReplicaSet géré par le Deployment) détecte que l'état observé (2 pods) ne
-correspond plus à l'état désiré (3 pods) et crée immédiatement un nouveau pod pour revenir à 3.
-Observé pendant le TP : le pod `api-deployment-...-k5hvq` supprimé a été remplacé aussitôt par
-`api-deployment-...-nxdkw`.
+Le volume est indépendant du conteneur. C'est pour cela que lorsque l'on utilise `docker compose down`, les conteneurs sont supprimés mais le volume reste présent. En redémarrant les services, PostgreSQL peut donc retrouver les données précédentes.
 
-On parle d'approche **déclarative** car on ne décrit pas les actions à effectuer (« lance un
-conteneur », « relance-le s'il meurt »), mais l'**état final souhaité** dans un manifest YAML.
-Kubernetes exécute en permanence une boucle de réconciliation qui compare l'état réel à l'état
-déclaré et corrige les écarts, sans intervention humaine.
+En revanche, avec `docker compose down -v`, le volume est également supprimé. La base repart alors de zéro et le fichier `init.sql` est exécuté à nouveau sur cette nouvelle base.
 
-## 4. Rôle du Service par rapport aux pods
+## 3. Un Deployment `replicas: 3` perd un pod : que fait Kubernetes ? Pourquoi parle-t-on d'approche « déclarative » ?
 
-Les pods sont éphémères : à chaque recréation ou mise à l'échelle, ils obtiennent une nouvelle
-adresse IP. Le **Service** fournit un point d'accès stable (nom DNS `api-service` et IP de
-cluster fixe, ici exposée en plus sur un port du nœud via `NodePort`). Il sélectionne les pods
-grâce à leurs labels (`app: mon-service`), met à jour automatiquement la liste des pods
-disponibles et répartit le trafic entre eux. Les clients n'ont donc jamais besoin de connaître les
-IP des pods.
+Si un Deployment est configuré avec `replicas: 3` et qu'un des pods est supprimé, Kubernetes remarque qu'il ne reste plus que 2 pods alors que 3 sont demandés.
 
-## 5. Deux limites de Docker seul (sans Kubernetes)
+Le Deployment, grâce au ReplicaSet qu'il gère, va donc automatiquement créer un nouveau pod pour revenir à 3.
 
-- **Pas d'auto-réparation** : si un conteneur ou la machine tombe, rien ne le recrée ailleurs
-  (`restart: always` ne relance que sur le même hôte, et ne gère pas la perte de l'hôte).
-- **Pas de mise à l'échelle ni de répartition de charge natives** : Docker Compose tourne sur un
-  seul hôte ; lancer plusieurs réplicas pose des conflits de ports (`8000:8000`) et il n'y a pas
-  de load balancer intégré ni de découverte de service multi-machines.
-- (Autres) Pas de déploiements progressifs (rolling update / rollback) ni d'ordonnancement sur
-  plusieurs nœuds en fonction des ressources disponibles.
+C'est ce que nous avons pu observer pendant le TP : après la suppression du pod `api-deployment-...-rjpbl`, Kubernetes en a automatiquement créé un nouveau, `api-deployment-...-7bmk7`.
+
+On parle d'approche **déclarative** car on indique simplement à Kubernetes l'état que l'on souhaite obtenir, par exemple `replicas: 3`, plutôt que de lui donner toutes les étapes à effectuer.
+
+Kubernetes vérifie ensuite régulièrement la différence entre l'état souhaité et l'état réel, puis effectue les changements nécessaires pour revenir à l'état demandé.
+
+## 4. Quel est le rôle du Service par rapport aux pods ?
+
+Les pods peuvent être supprimés ou recréés à tout moment. Leur adresse IP peut donc changer, ce qui rendrait compliqué l'accès direct à un pod précis.
+
+Le **Service** permet justement d'avoir un point d'accès stable pour communiquer avec les pods. Dans notre cas, le Service est accessible avec le nom `api-service` et possède une adresse IP de cluster stable. Il est également exposé avec un `NodePort`.
+
+Le Service utilise les labels, par exemple `app: mon-service`, pour identifier les pods concernés. Il peut ensuite envoyer les requêtes vers les différents pods disponibles.
+
+Ainsi, les utilisateurs ou les autres applications n'ont pas besoin de connaître directement les adresses IP des pods.
+
+## 5. Deux limites de Docker seul, sans Kubernetes
+
+Docker permet déjà de lancer et gérer des conteneurs, mais il présente certaines limites lorsqu'on veut gérer une application avec plusieurs instances.
+
+- **Pas de véritable auto-réparation :** si un conteneur tombe, certaines options comme `restart: always` permettent de le redémarrer, mais cela reste limité au même hôte. Si la machine entière tombe, Docker ne peut pas automatiquement déplacer le conteneur sur une autre machine.
+
+- **Mise à l'échelle limitée :** avec Docker Compose, les conteneurs sont généralement lancés sur un seul hôte. Lancer plusieurs instances peut notamment créer des problèmes de ports, comme avec `8000:8000`. Docker seul ne fournit pas non plus un système complet de répartition du trafic entre plusieurs machines.
+
+On peut également citer d'autres limites, comme l'absence de gestion avancée des déploiements progressifs, des rollbacks ou de l'ordonnancement automatique des conteneurs sur plusieurs machines en fonction des ressources disponibles.
